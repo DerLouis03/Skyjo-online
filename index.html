@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Skyjo Online</title>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root{--bg:#0f172a;--panel:#1e293b;--text:#f1f5f9;--sub:#94a3b8;--accent:#38bdf8;--ok:#22c55e;}
+*{box-sizing:border-box;}
+html,body{height:100%;}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,Segoe UI,Roboto,sans-serif;}
+.wrap{max-width:900px;margin:0 auto;padding:16px;}
+h1{font-size:1.4rem;margin:0 0 4px;}
+.sub{color:var(--sub);font-size:.85rem;margin-bottom:16px;}
+input,button{font-size:1rem;border-radius:10px;border:1px solid #334155;padding:10px 14px;}
+input{background:var(--panel);color:var(--text);width:100%;}
+button{background:var(--accent);color:#04202e;font-weight:700;border:none;cursor:pointer;}
+button:disabled{opacity:.4;cursor:not-allowed;}
+button.secondary{background:var(--panel);color:var(--text);border:1px solid #334155;}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+.card-panel{background:var(--panel);border-radius:14px;padding:14px;margin-bottom:14px;}
+.playerlist{list-style:none;padding:0;margin:8px 0;}
+.playerlist li{padding:6px 0;border-bottom:1px solid #334155;display:flex;justify-content:space-between;}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;max-width:280px;margin:8px auto;}
+.grid.big{max-width:340px;}
+.cell{aspect-ratio:2/3;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:1.1rem;color:#fff;user-select:none;border:2px solid transparent;}
+.grid.big .cell{font-size:1.4rem;}
+.cell.back{background:#334155;color:#64748b;}
+.cell.cleared{background:#0f172a;color:#334155;border:2px dashed #334155;}
+.cell.pickable{cursor:pointer;border-color:var(--accent);animation:pulse 1.2s infinite;}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(56,189,248,.5);}50%{box-shadow:0 0 0 6px rgba(56,189,248,0);}}
+.piles{display:flex;gap:20px;align-items:center;justify-content:center;margin:10px 0;}
+.pile{width:64px;height:96px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;cursor:pointer;border:2px solid transparent;}
+.pile.disabled{cursor:not-allowed;opacity:.5;}
+.pile.pickable{border-color:var(--accent);animation:pulse 1.2s infinite;}
+.deckpile{background:#334155;}
+.otherplayers{display:flex;gap:10px;overflow-x:auto;padding:6px 2px;}
+.opcard{background:var(--panel);border-radius:12px;padding:8px;min-width:150px;flex:0 0 auto;}
+.opcard.turn{outline:2px solid var(--accent);}
+.opname{font-size:.85rem;font-weight:700;margin-bottom:4px;display:flex;justify-content:space-between;}
+.score{font-size:.75rem;color:var(--sub);}
+.msg{background:#0c4a6e;color:#e0f2fe;padding:8px 12px;border-radius:10px;font-size:.9rem;margin-bottom:10px;text-align:center;}
+.roomcode{font-size:1.8rem;letter-spacing:4px;font-weight:800;color:var(--accent);text-align:center;margin:6px 0;}
+.footer-actions{display:flex;gap:8px;margin-top:10px;}
+.badge{background:var(--ok);color:#04250f;font-size:.7rem;padding:2px 8px;border-radius:999px;font-weight:700;}
+.status{font-size:.75rem;color:var(--sub);text-align:center;margin-top:6px;}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><p>Lade…</p></div>
+<script>
+const VALUE_COUNTS={"-2":5,"-1":10,"0":15,"1":10,"2":10,"3":10,"4":10,"5":10,"6":10,"7":10,"8":10,"9":10,"10":10,"11":10,"12":10};
+function buildDeck(){let d=[];for(const v in VALUE_COUNTS){for(let i=0;i<VALUE_COUNTS[v];i++)d.push(parseInt(v));}return shuffle(d);}
+function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
+function colorFor(v){if(v<=-1)return'#3b3fa1';if(v===0)return'#22b8cf';if(v<=4)return'#2fae5b';if(v<=8)return'#eab308';return'#e0393e';}
+
+let isHost=false, peer=null, conns={}, hostConn=null, myId=null, myName='', roomCode=null, connected=false;
+let state=null;
+
+function freshRoom(hostId){return{players:[],phase:'lobby',turn:0,deck:[],discard:[],drawn:null,round:1,totals:{},finalTriggered:null,finalOrder:[],message:'',hostId:hostId};}
+
+function broadcast(){ for(const id in conns){ try{conns[id].send({type:'state',state});}catch(e){} } }
+function afterAction(){ if(isHost) broadcast(); render(); }
+
+// ---- game logic (runs on host only; guests send requests) ----
+function doJoin(pid,name){
+  if(state.phase!=='lobby') return;
+  if(state.players.find(p=>p.id===pid)){ state.players.find(p=>p.id===pid).name=name; return; }
+  if(state.players.length>=8) return;
+  state.players.push({id:pid,name:name,grid:[],revealed:[],cleared:[],flipDone:false});
+}
+function doStart(pid){
+  if(pid!==state.hostId||state.players.length<2) return;
+  const deck=buildDeck();
+  state.players.forEach(p=>{p.grid=deck.splice(0,12);p.revealed=new Array(12).fill(false);p.cleared=new Array(12).fill(false);p.flipDone=false;if(!(p.id in state.totals))state.totals[p.id]=0;});
+  state.discard=[deck.pop()];state.deck=deck;state.phase='flip';state.drawn=null;state.finalTriggered=null;state.finalOrder=[];
+  state.message='Deckt je 2 Karten auf, dann beginnt das Spiel.';
+}
+function doFlip(pid,i){
+  const p=state.players.find(x=>x.id===pid);
+  if(!p||p.flipDone||p.revealed[i])return;
+  p.revealed[i]=true;
+  if(p.revealed.filter(Boolean).length>=2)p.flipDone=true;
+  if(state.players.every(pl=>pl.flipDone)){state.phase='play';state.turn=0;state.message=state.players[0].name+' ist am Zug.';}
+}
+function checkColumns(p){
+  for(let c=0;c<4;c++){const idx=[c,c+4,c+8];
+    if(idx.every(i=>p.revealed[i]&&!p.cleared[i])){const vals=idx.map(i=>p.grid[i]);if(vals[0]===vals[1]&&vals[1]===vals[2])idx.forEach(i=>p.cleared[i]=true);}
+  }
+}
+function isDone(p){return p.grid.every((_,i)=>p.revealed[i]||p.cleared[i]);}
+function nextTurn(){
+  const n=state.players.length;
+  if(state.finalTriggered){
+    state.finalOrder.shift();
+    if(state.finalOrder.length===0){endRound();return;}
+    state.turn=state.players.findIndex(p=>p.id===state.finalOrder[0]);
+    state.message=state.players[state.turn].name+' ist am Zug (letzte Runde).';
+  } else {
+    state.turn=(state.turn+1)%n;
+    state.message=state.players[state.turn].name+' ist am Zug.';
+  }
+}
+function endRound(){
+  let scores={};
+  state.players.forEach(p=>{let sum=0;p.grid.forEach((v,i)=>{if(!p.cleared[i])sum+=v;});scores[p.id]=sum;});
+  if(state.finalTriggered){
+    const ts=scores[state.finalTriggered];
+    const others=state.players.filter(p=>p.id!==state.finalTriggered).map(p=>scores[p.id]);
+    if(others.length&&ts>=Math.min(...others))scores[state.finalTriggered]=ts*2;
+  }
+  state.players.forEach(p=>{state.totals[p.id]=(state.totals[p.id]||0)+scores[p.id];});
+  const summary=state.players.map(p=>p.name+': +'+scores[p.id]).join(', ');
+  if(Object.values(state.totals).some(t=>t>=100)){
+    state.phase='ended';
+    const wid=Object.keys(state.totals).reduce((a,b)=>state.totals[a]<state.totals[b]?a:b);
+    const w=state.players.find(p=>p.id===wid);
+    state.message='Runde beendet ('+summary+'). Spiel vorbei — Gewinner: '+(w?w.name:'?');
+  } else {
+    const deck=buildDeck();
+    state.players.forEach(p=>{p.grid=deck.splice(0,12);p.revealed=new Array(12).fill(false);p.cleared=new Array(12).fill(false);p.flipDone=false;});
+    state.discard=[deck.pop()];state.deck=deck;state.phase='flip';state.drawn=null;state.finalTriggered=null;state.finalOrder=[];state.round+=1;
+    state.message='Runde '+state.round+': '+summary+'. Deckt je 2 Karten auf.';
+  }
+}
+function maybeFinish(p){
+  if(isDone(p)&&!state.finalTriggered){
+    state.finalTriggered=p.id;
+    state.finalOrder=state.players.filter(x=>x.id!==p.id).map(x=>x.id);
+    if(state.finalOrder.length===0){endRound();return true;}
+  }
+  return false;
+}
+function doDrawDeck(pid){
+  if(state.players[state.turn].id!==pid||state.drawn)return;
+  if(state.deck.length===0){const top=state.discard.pop();state.deck=shuffle(state.discard);state.discard=[top];}
+  state.drawn={val:state.deck.pop(),from:'deck'};
+}
+function doDrawDiscard(pid){
+  if(state.players[state.turn].id!==pid||state.drawn||state.discard.length===0)return;
+  state.drawn={val:state.discard.pop(),from:'discard'};
+}
+function doSwap(pid,i){
+  if(state.players[state.turn].id!==pid||!state.drawn)return;
+  const p=state.players.find(x=>x.id===pid);
+  if(p.cleared[i])return;
+  const old=p.grid[i];p.grid[i]=state.drawn.val;p.revealed[i]=true;state.discard.push(old);state.drawn=null;
+  checkColumns(p); if(maybeFinish(p))return; nextTurn();
+}
+function doDiscardFlip(pid,i){
+  if(state.players[state.turn].id!==pid||!state.drawn||state.drawn.from!=='deck')return;
+  const p=state.players.find(x=>x.id===pid);
+  if(p.revealed[i]||p.cleared[i])return;
+  state.discard.push(state.drawn.val);p.revealed[i]=true;state.drawn=null;
+  checkColumns(p); if(maybeFinish(p))return; nextTurn();
+}
+function doReset(pid){ if(pid!==state.hostId)return; state=freshRoom(state.hostId); state.players.push({id:pid,name:myName,grid:[],revealed:[],cleared:[],flipDone:false}); }
+
+function applyAction(pid,action,payload){
+  payload=payload||{};
+  if(action==='join')doJoin(pid,payload.name);
+  else if(action==='start')doStart(pid);
+  else if(action==='flip')doFlip(pid,payload.i);
+  else if(action==='drawDeck')doDrawDeck(pid);
+  else if(action==='drawDiscard')doDrawDiscard(pid);
+  else if(action==='swap')doSwap(pid,payload.i);
+  else if(action==='discardFlip')doDiscardFlip(pid,payload.i);
+  else if(action==='reset')doReset(pid);
+}
+
+// unified entry point used by UI
+function act(action,payload){
+  if(isHost){ applyAction(myId,action,payload); afterAction(); }
+  else if(hostConn&&hostConn.open){ hostConn.send({type:'action',action:action,payload:payload}); }
+}
+
+// ---- networking setup ----
+function randomCode(){const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let s='';for(let i=0;i<5;i++)s+=c[Math.floor(Math.random()*c.length)];return s;}
+
+function hostSetupConn(conn){
+  conns[conn.peer]=conn;
+  conn.on('data',msg=>{
+    if(msg.type==='join'){ applyAction(conn.peer,'join',{name:msg.name}); afterAction(); }
+    else if(msg.type==='action'){ applyAction(conn.peer,msg.action,msg.payload); afterAction(); }
+  });
+  conn.on('close',()=>{ delete conns[conn.peer]; });
+  conn.send({type:'state',state});
+}
+
+function createRoom(name){
+  myName=name; roomCode=randomCode();
+  peer=new Peer(roomCode,{debug:0});
+  peer.on('open',id=>{
+    myId=id; isHost=true; connected=true;
+    state=freshRoom(myId);
+    state.players.push({id:myId,name:myName,grid:[],revealed:[],cleared:[],flipDone:false});
+    render();
+  });
+  peer.on('connection',conn=>{ conn.on('open',()=>hostSetupConn(conn)); });
+  peer.on('error',err=>{
+    if(err.type==='unavailable-id'){ createRoom(name); }
+    else { document.getElementById('app').innerHTML='<h1>Skyjo Online</h1><div class="card-panel"><p>Verbindungsfehler: '+err.type+'</p></div>'; }
+  });
+}
+
+function joinRoom(code,name){
+  myName=name; roomCode=code.toUpperCase().trim();
+  peer=new Peer(undefined,{debug:0});
+  peer.on('open',id=>{
+    myId=id; isHost=false;
+    hostConn=peer.connect(roomCode,{reliable:true});
+    hostConn.on('open',()=>{ connected=true; hostConn.send({type:'join',name:myName}); render(); });
+    hostConn.on('data',msg=>{ if(msg.type==='state'){ state=msg.state; render(); } });
+    hostConn.on('close',()=>{ connected=false; render(); });
+    hostConn.on('error',()=>{ document.getElementById('app').innerHTML='<h1>Skyjo Online</h1><div class="card-panel"><p>Raum "'+roomCode+'" nicht erreichbar. Code prüfen oder neu versuchen.</p></div>'; });
+  });
+}
+
+// ---- UI ----
+function me(){return state&&state.players?state.players.find(p=>p.id===myId):null;}
+function isMyTurn(){return state&&state.phase==='play'&&state.players[state.turn]&&state.players[state.turn].id===myId;}
+
+window.startHostFlow=function(){
+  const n=(document.getElementById('nameInput').value||'Spieler').trim().slice(0,16);
+  document.getElementById('app').innerHTML='<h1>🎴 Skyjo Online</h1><div class="card-panel"><p>Raum wird erstellt…</p></div>';
+  createRoom(n);
+};
+window.startJoinFlow=function(){
+  const n=(document.getElementById('nameInputJ').value||'Spieler').trim().slice(0,16);
+  const c=document.getElementById('codeInput').value;
+  document.getElementById('app').innerHTML='<h1>🎴 Skyjo Online</h1><div class="card-panel"><p>Verbinde mit Raum '+c.toUpperCase()+'…</p></div>';
+  joinRoom(c,n);
+};
+window.showJoinForm=function(){
+  const params=new URLSearchParams(location.search);
+  document.getElementById('app').innerHTML=`
+    <h1>🎴 Skyjo Online</h1>
+    <div class="card-panel">
+      <input id="nameInputJ" placeholder="Dein Name" maxlength="16">
+      <div style="height:8px"></div>
+      <input id="codeInput" placeholder="Raum-Code" value="${params.get('room')||''}" maxlength="5" style="text-transform:uppercase">
+      <div class="footer-actions"><button onclick="startJoinFlow()">Beitreten</button><button class="secondary" onclick="render()">Zurück</button></div>
+    </div>`;
+};
+
+function cellHTML(p,i,pickable){
+  let cls='cell'+(p.cleared[i]?' cleared':(!p.revealed[i]?' back':''))+(pickable?' pickable':'');
+  let style=(p.revealed[i]&&!p.cleared[i])?('background:'+colorFor(p.grid[i])+';'):'';
+  let label=p.cleared[i]?'':(p.revealed[i]?p.grid[i]:'?');
+  return `<div class="${cls}" style="${style}" onclick="${pickable?('cellClick('+i+')'):''}">${label}</div>`;
+}
+let pendingDiscardFlip=false;
+window.cellClick=function(i){
+  if(state.phase==='flip'){ act('flip',{i}); return; }
+  if(state.phase==='play'&&isMyTurn()&&state.drawn){
+    if(pendingDiscardFlip){ pendingDiscardFlip=false; act('discardFlip',{i}); }
+    else { act('swap',{i}); }
+  }
+};
+window.discardMode=function(){ pendingDiscardFlip=true; render(); };
+
+function render(){
+  const app=document.getElementById('app');
+  if(!state){
+    app.innerHTML=`
+      <h1>🎴 Skyjo Online</h1>
+      <div class="sub">Bis zu 8 Spieler, direkte Peer-to-Peer-Verbindung — kein Server nötig.</div>
+      <div class="card-panel">
+        <p>Raum erstellen und Freunde per Code oder Link einladen:</p>
+        <input id="nameInput" placeholder="Dein Name" maxlength="16">
+        <div class="footer-actions"><button onclick="startHostFlow()">Raum erstellen</button><button class="secondary" onclick="showJoinForm()">Raum beitreten</button></div>
+      </div>`;
+    return;
+  }
+  if(state.phase==='lobby'){
+    const shareLink=location.origin+location.pathname+'?room='+state.hostId;
+    app.innerHTML=`
+      <h1>🎴 Skyjo Online</h1>
+      <div class="card-panel">
+        <p class="sub" style="text-align:center;margin-bottom:0">Raum-Code</p>
+        <div class="roomcode">${state.hostId}</div>
+        <p class="sub" style="text-align:center;word-break:break-all">${isHost?shareLink:''}</p>
+        <p>Spieler (${state.players.length}/8):</p>
+        <ul class="playerlist">${state.players.map(p=>`<li>${p.name}${p.id===state.hostId?' <span class="badge">Host</span>':''}${p.id===myId?' (du)':''}</li>`).join('')}</ul>
+        ${isHost?`<button onclick="act('start')" ${state.players.length<2?'disabled':''}>Spiel starten</button>`:'<p>Warte auf Host…</p>'}
+      </div>`;
+    return;
+  }
+  const myself=me();
+  if(!myself){ app.innerHTML=`<h1>🎴 Skyjo Online</h1><div class="card-panel"><p>Diese Runde läuft bereits ohne dich.</p></div>`; return; }
+  const others=state.players.filter(p=>p.id!==myId);
+  let topHtml='';
+  if(state.phase==='flip'){
+    topHtml=`<div class="msg">Deckt 2 eurer Karten auf. ${myself.flipDone?'Warte auf andere Spieler…':''}</div>`;
+  } else if(state.phase==='play'){
+    const myTurn=isMyTurn();
+    topHtml=`<div class="msg">${state.message||''}</div>
+      <div class="piles">
+        <div class="pile deckpile ${myTurn&&!state.drawn?'pickable':'disabled'}" onclick="${myTurn&&!state.drawn?"act('drawDeck')":''}">🂠 ${state.deck.length}</div>
+        <div class="pile ${myTurn&&!state.drawn&&state.discard.length?'pickable':'disabled'}" style="background:${state.discard.length?colorFor(state.discard[state.discard.length-1]):'#334155'}" onclick="${myTurn&&!state.drawn&&state.discard.length?"act('drawDiscard')":''}">${state.discard.length?state.discard[state.discard.length-1]:'-'}</div>
+        ${state.drawn?`<div class="pile" style="background:${colorFor(state.drawn.val)}">${state.drawn.val}</div>`:''}
+      </div>
+      ${myTurn&&state.drawn?`<p class="sub" style="text-align:center">Karte ${state.drawn.val}: auf eigenes Feld tippen zum Tauschen.${state.drawn.from==='deck'&&!pendingDiscardFlip?' Oder ablegen &amp; Karte aufdecken:':''}</p>`:''}
+      ${myTurn&&state.drawn&&state.drawn.from==='deck'&&!pendingDiscardFlip?`<div style="text-align:center"><button class="secondary" onclick="discardMode()">Ablegen &amp; Karte aufdecken</button></div>`:''}
+      ${pendingDiscardFlip?`<p class="sub" style="text-align:center">Tippe auf eine verdeckte Karte, um sie aufzudecken.</p>`:''}
+    `;
+  } else if(state.phase==='ended'){
+    topHtml=`<div class="msg">${state.message}</div>${isHost?'<div style="text-align:center"><button onclick="act(\'reset\')">Neues Spiel</button></div>':''}`;
+  }
+  const myPickable=(state.phase==='flip'&&!myself.flipDone)||(state.phase==='play'&&isMyTurn()&&state.drawn);
+  const myGrid=`<div class="grid big">${myself.grid.map((v,i)=>cellHTML(myself,i,myPickable)).join('')}</div>`;
+  const otherHtml=others.map(p=>`
+    <div class="opcard ${state.phase==='play'&&state.players[state.turn]&&state.players[state.turn].id===p.id?'turn':''}">
+      <div class="opname"><span>${p.name}</span><span class="score">Σ ${state.totals[p.id]||0}</span></div>
+      <div class="grid">${p.grid.map((v,i)=>cellHTML(p,i,false)).join('')}</div>
+    </div>`).join('');
+  app.innerHTML=`
+    <h1>🎴 Skyjo · Runde ${state.round}</h1>
+    ${topHtml}
+    <div class="card-panel"><p class="sub" style="text-align:center;margin:0 0 4px">Dein Feld — ${myself.name}</p>${myGrid}</div>
+    <div class="card-panel"><p class="sub" style="margin:0 0 4px">Mitspieler</p><div class="otherplayers">${otherHtml}</div></div>
+    ${!isHost?`<p class="status">${connected?'Verbunden':'Verbindung getrennt — bitte neu laden'}</p>`:'<p class="status">Du bist Host — diesen Tab bitte offen lassen.</p>'}
+  `;
+}
+
+// auto-fill join form if opened via share link
+(function(){
+  const params=new URLSearchParams(location.search);
+  render();
+  if(params.get('room')) showJoinForm();
+})();
+</script>
+</body>
+</html>
